@@ -163,3 +163,23 @@ def test_zero_shot_script(tmp_path, tiny_model):
         "--prompt", "a scratch", "--base-model", tiny_model, "--num", "2", "--size", "64", "--steps", "2",
         "--mask-mode", "blob", "--diff-threshold", "1", "--min-changed-ratio", "0.01")
     assert len(list((root / "zs/images").glob("*.png"))) == 2
+
+
+def test_sam_box_to_mask(tmp_path):
+    pytest.importorskip("transformers")
+    from tests.tiny_sam import build_tiny_sam
+    model = build_tiny_sam(tmp_path / "tiny_sam")
+    write_rgb(tmp_path / "ann/x.png", np.full((60, 80, 3), 128, np.uint8))
+    ann = {"imageHeight": 60, "imageWidth": 80, "imagePath": "x.png", "shapes": [
+        {"label": "scratch", "shape_type": "rectangle", "points": [[10, 10], [30, 25]]},
+        {"label": "scratch", "shape_type": "rectangle", "points": [[60, 50], [50, 40]]}]}
+    (tmp_path / "ann/x.json").write_text(json.dumps(ann))
+    run("scripts/sam_box_to_mask.py", "--json-dir", str(tmp_path / "ann"), "--out-dir", str(tmp_path / "m"),
+        "--model", model, "--box-margin", "2", "--fallback-box", "--copy-images-to", str(tmp_path / "img"))
+    assert (tmp_path / "img/scratch/x.png").exists()
+    m = read_mask(tmp_path / "m/scratch/x.png")
+    assert m.shape == (60, 80)
+    outside = m.copy()
+    outside[8:28, 8:33] = 0   # box 1 + margin
+    outside[38:53, 48:63] = 0  # box 2 + margin
+    assert outside.sum() == 0  # mask never leaks outside the boxes

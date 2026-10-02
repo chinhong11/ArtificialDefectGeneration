@@ -53,12 +53,19 @@ python scripts/labelme_to_masks.py --json-dir data/metal_part/defect_raw \
 Use "Create LineStrip" for thin scratches/cracks (drawn with `--line-width`, default 5 px).
 
 **Option B — boxes + SAM (fastest)**
-Draw only rectangles in labelme, then let Segment Anything make the pixel masks:
+Draw only rectangles in labelme, then let Segment Anything (SAM) find the defect pixels inside each box:
 ```bash
+pip install labelme
+labelme data/metal_part/defect_raw     # "Create Rectangle", label "scratch", save (JSON next to image)
 python scripts/sam_box_to_mask.py --json-dir data/metal_part/defect_raw \
-    --out-dir data/metal_part/masks --fallback-box
-# copy images to data/metal_part/defect/<type>/ (or run labelme_to_masks with --copy-images-to once)
+    --out-dir data/metal_part/masks --copy-images-to data/metal_part/defect --fallback-box
 ```
+- Box tightly around the defect (a few px margin). One box per defect; several boxes per image are fine.
+- The mask is always clipped to the box (+`--box-margin`, default 4 px), so SAM can't spill onto the background.
+- `--fallback-box` uses the filled box when SAM finds nothing — check those, a filled box is a poor mask.
+- First run downloads `facebook/sam-vit-base` (~375 MB). If masks are poor, try `--model facebook/sam-vit-large` or `facebook/sam-vit-huge` (slower, often better on fine defects).
+- Works on CPU (slow) or GPU.
+- SAM is trained on natural photos; on faint, low-contrast or very thin defects (fine scratches, light stains) it may grab too much or too little. Fix those few in labelme with polygons (Option A) — mixing both is fine.
 
 **Always review the masks:**
 ```bash
@@ -184,6 +191,6 @@ Read *AnomalyDiffusion: Few-Shot Anomaly Image Generation with Diffusion Model* 
 | `tests/` | self-test with a tiny random model | no |
 
 ## Honest limits
-- The code is tested end-to-end only with a tiny random model on CPU (tests/); `sam_box_to_mask.py` is untested (needs the SAM model download). Training time and result quality on real data have **not** been measured yet — Step 4 hyper-parameters are common starting points, expect to tune them.
+- The code is tested end-to-end only with a tiny random model on CPU (tests/); `sam_box_to_mask.py` is tested only with a tiny random SAM model, so its mask quality on your defects is unknown until you run it. Training time and result quality on real data have **not** been measured yet — Step 4 hyper-parameters are common starting points, expect to tune them.
 - The refined mask is "pixels that changed", which can include slight shading around the defect; check grids.
 - Synthetic data supplements real data; it can't fix a test set that the model has never seen anything similar to.

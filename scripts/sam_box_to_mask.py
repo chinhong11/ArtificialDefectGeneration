@@ -7,12 +7,14 @@ too much or too little on low-contrast defects; fix bad ones by hand.
 Example:
     python scripts/sam_box_to_mask.py \
         --json-dir data/metal_part/defect_raw \
-        --out-dir data/metal_part/masks
+        --out-dir data/metal_part/masks --copy-images-to data/metal_part/defect
 
 Writes data/metal_part/masks/<label>/<image_stem>.png
+(and copies the image to data/metal_part/defect/<label>/)
 """
 import argparse
 import json
+import shutil
 import sys
 from pathlib import Path
 
@@ -30,6 +32,7 @@ def main():
     ap.add_argument("--model", default="facebook/sam-vit-base", help="e.g. facebook/sam-vit-large / -huge")
     ap.add_argument("--box-margin", type=int, default=4, help="Mask is clipped to the box grown by this many px")
     ap.add_argument("--fallback-box", action="store_true", help="Use the filled box if SAM returns an empty mask")
+    ap.add_argument("--copy-images-to", help="Also copy source images to <this>/<label>/")
     args = ap.parse_args()
 
     import torch
@@ -73,6 +76,10 @@ def main():
                     part[max(0, by0):by1 + 1, max(0, bx0):bx1 + 1] = 255
                 final = np.maximum(final, part)
             write_mask(Path(args.out_dir) / label / f"{jf.stem}.png", final)
+            if args.copy_images_to:
+                dst = Path(args.copy_images_to) / label / (jf.stem + img_path.suffix)
+                dst.parent.mkdir(parents=True, exist_ok=True)
+                shutil.copy2(img_path, dst)
             print(f"{jf.stem} [{label}]: {len(boxes)} box(es), {int((final > 0).sum())} px")
 
 
