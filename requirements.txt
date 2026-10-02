@@ -1,0 +1,18 @@
+# Core (CPU parts: annotation conversion, crops, masks, export, grids)
+numpy
+opencv-python
+pillow
+
+# Diffusion (training + generation, needs a CUDA GPU in practice)
+# Install PyTorch first for your CUDA version: https://pytorch.org/get-started/locally/
+torch
+diffusers>=0.30
+transformers
+accelerate
+peft>=0.10
+safetensors
+
+# Optional
+bitsandbytes   # --use-8bit-adam (Linux + CUDA)
+labelme        # annotation tool
+pytest         # tests

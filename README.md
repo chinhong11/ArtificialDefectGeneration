@@ -18,5 +18,18 @@ Full research write-up: **[docs/RESEARCH.md](docs/RESEARCH.md)**
 
 **PatchCore:** trains on good images only; use the synthetic defects to validate it and tune its threshold, not to train it.
 
+## Quick start
+Step-by-step guide: **[docs/GETTING_STARTED.md](docs/GETTING_STARTED.md)**
+
+```bash
+pip install -r requirements.txt                       # install PyTorch for your CUDA first
+python scripts/labelme_to_masks.py ...                # 1. annotations -> masks
+python scripts/zero_shot_inpaint.py ...               # 2. sanity test, no training
+python -m src.data.prepare_crops ...                  # 3. 512px crops around defects
+accelerate launch -m src.diffusion.train_lora ...     # 4. LoRA on SD inpainting (GPU)
+python -m src.diffusion.inpaint_generate ...          # 5. synthetic images + masks + YOLO boxes
+python -m pytest -q tests                             # self-test (tiny random model, CPU)
+```
+
 ## Status
-Research stage — no code yet. See the proposed structure in [docs/RESEARCH.md §8](docs/RESEARCH.md#8-proposed-code-structure-for-a-future-implementation).
+Starter code tested end-to-end on CPU with a tiny random model only; not yet validated on real defect data.
