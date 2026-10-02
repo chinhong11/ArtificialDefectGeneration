@@ -122,10 +122,13 @@ def main(argv=None):
     out = Path(args.out)
     out.mkdir(parents=True, exist_ok=True)
     meta = open(out / "metadata.jsonl", "a")
-    done = discarded = 0
+    done = discarded = roi_misses = 0
     while done < args.num:
         if discarded > 10 * args.num + 50:
             print("Too many discarded samples - check prompt / LoRA / --diff-threshold. Stopping.")
+            break
+        if roi_misses > 2000 * args.num + 2000:
+            print("Could not place masks inside the ROI - check --roi-dir masks or lower --min-roi-overlap. Stopping.")
             break
         gpath = rng.choice(good)
         img = read_rgb(gpath)
@@ -139,6 +142,7 @@ def main(argv=None):
             roi_win = roi[y0:y0 + side, x0:x0 + side]
             inside = ((planned_win > 0) & (roi_win > 0)).sum() / max(1, (planned_win > 0).sum())
             if inside < args.min_roi_overlap:
+                roi_misses += 1
                 continue  # resample location/mask; not counted as a discard
 
         win = img[y0:y0 + side, x0:x0 + side]

@@ -149,8 +149,14 @@ python -m src.export --images outputs/gen_scratch/images --masks outputs/gen_scr
     --class-id 0 --class-name scratch --coco outputs/gen_scratch/coco.json
 ```
 
+**ROI (needed when images show background):** without it, defects can be painted onto the empty background. In labelme, draw one polygon labelled `roi` around the part on each good image, then:
+```bash
+python scripts/labelme_to_masks.py --json-dir data/metal_part/good --out-dir data/metal_part/roi_masks
+# then add to the generate command:  --roi-dir data/metal_part/roi_masks/roi
+```
+If parts are always in the same position, you can draw it once and copy the mask PNG for every good image name.
+
 Useful options:
-- `--roi-dir data/metal_part/roi` — masks (same name as good images) marking where defects may appear (on the part, not background). Strongly recommended if your images contain background.
 - `--mask-mode stroke` for scratches/cracks, `blob` for stains/dents.
 - `--lora-scale 0.6–1.0` — lower = more "generic", higher = more like training defects.
 - `--diff-threshold` — raise it if labels include faint background changes, lower it for subtle defects.

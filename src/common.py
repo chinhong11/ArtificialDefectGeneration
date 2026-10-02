@@ -4,7 +4,7 @@ from pathlib import Path
 import cv2
 import numpy as np
 
-IMAGE_EXTS = {".png", ".jpg", ".jpeg", ".bmp", ".tif", ".tiff"}
+IMAGE_EXTS = {".png", ".jpg", ".jpeg", ".bmp", ".tif", ".tiff", ".webp"}
 
 
 def list_images(folder):

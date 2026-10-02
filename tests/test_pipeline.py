@@ -183,3 +183,11 @@ def test_sam_box_to_mask(tmp_path):
     outside[8:28, 8:33] = 0   # box 1 + margin
     outside[38:53, 48:63] = 0  # box 2 + margin
     assert outside.sum() == 0  # mask never leaks outside the boxes
+
+
+def test_webp_images_are_listed_and_read(tmp_path):
+    from src.common import list_images, read_rgb
+    img = np.full((20, 30, 3), 100, np.uint8)
+    assert cv2.imwrite(str(tmp_path / "a.webp"), img)
+    paths = list_images(tmp_path)
+    assert [p.name for p in paths] == ["a.webp"] and read_rgb(paths[0]).shape == (20, 30, 3)
