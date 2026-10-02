@@ -191,3 +191,29 @@ def test_webp_images_are_listed_and_read(tmp_path):
     assert cv2.imwrite(str(tmp_path / "a.webp"), img)
     paths = list_images(tmp_path)
     assert [p.name for p in paths] == ["a.webp"] and read_rgb(paths[0]).shape == (20, 30, 3)
+
+
+def test_run_real_test_orchestration(tmp_path, tiny_model):
+    """The one-command test script, with tiny models instead of the real ones."""
+    from tests.tiny_sam import build_tiny_sam
+    sam = build_tiny_sam(tmp_path / "tiny_sam")
+    root = make_dataset(tmp_path / "d")
+    raw = root / "defect_raw"
+    raw.mkdir()
+    for i, p in enumerate(sorted((root / "defect/scratch").glob("*.png"))):
+        (raw / p.name).write_bytes(p.read_bytes())
+        (raw / f"{p.stem}.json").write_text(json.dumps({
+            "imagePath": p.name, "imageHeight": 160, "imageWidth": 200,
+            "shapes": [{"label": "scratch", "shape_type": "rectangle", "points": [[36 + 10 * i, 46], [94 + 10 * i, 84]]}]}))
+    for p in (root / "good").glob("*.png"):
+        (root / "good" / f"{p.stem}.json").write_text(json.dumps({
+            "imagePath": p.name, "imageHeight": 160, "imageWidth": 200,
+            "shapes": [{"label": "roi", "shape_type": "polygon", "points": [[0, 0], [199, 0], [199, 159], [0, 159]]}]}))
+    out = tmp_path / "out"
+    run("scripts/run_real_test.py", "--data", str(root), "--out", str(out), "--sd-model", tiny_model,
+        "--sam-model", sam, "--size", "64", "--steps", "2", "--num", "2", "--infer-steps", "2",
+        "--gen-extra", "--diff-threshold 1 --min-changed-ratio 0.01 --mask-dilate 2 --feather 1")
+    report = (out / "report.txt").read_text()
+    assert "ALL STEPS PASSED" in report, report
+    for f in ("01_sam_masks.png", "02_crops.png", "03_zero_shot.png", "04_lora_samples.png", "05_lora_generated.png"):
+        assert (out / f).exists(), f

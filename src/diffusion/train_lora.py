@@ -272,6 +272,8 @@ def main(argv=None):
         if args.sample_every:
             unet.eval()
             save_samples(make_pipe(), dataset, good_paths, args, step, accelerator.device)
+        if torch.cuda.is_available():
+            print(f"peak GPU memory: {torch.cuda.max_memory_allocated() / 2**30:.1f} GB")
     accelerator.end_training()
 
 

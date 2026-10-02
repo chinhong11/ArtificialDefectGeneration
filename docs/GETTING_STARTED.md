@@ -27,6 +27,22 @@ The first real run downloads the base model `stable-diffusion-v1-5/stable-diffus
 
 ---
 
+## Quick check: test everything on a few images first
+
+Before annotating a full dataset, run the whole pipeline once on ~5 images with the real models:
+
+1. Put images in `data/<product>/good/` (2+) and `data/<product>/defect_raw/` (3+).
+2. In labelme: draw a **rectangle** around each defect (one label, e.g. `defect`) on the defect images, and a **polygon labelled `roi`** around the part on each good image. Save (JSON next to each image).
+3. Run:
+   ```bash
+   python scripts/run_real_test.py --data data/<product>
+   ```
+4. Look at / send back `outputs/real_test/`: `01_sam_masks.png`, `02_crops.png`, `03_zero_shot.png`, `04_lora_samples.png`, `05_lora_generated.png`, `report.txt` (and `log.txt` if something failed).
+
+It runs a short LoRA training (200 steps on GPU) — enough to prove everything works, not enough for good quality.
+
+---
+
 ## Step 1 — Data and masks (most important step)
 
 ### 1a. Folder layout
