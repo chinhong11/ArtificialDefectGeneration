@@ -37,7 +37,7 @@ Everything runs on your own PC; images never leave it. Work through the tabs lef
 | Tab | What you do |
 |---|---|
 | 1 · Images | Upload good images and defect images |
-| 2 · Annotate | Defect images: click 2 corners to box each defect. Good images: click around the part, then *Finish outline*. Small defects: *Move view* → click the defect → Zoom 4× / 8× |
+| 2 · Annotate | **Defect images:** drag a box around each defect (drag corners to resize, mouse wheel to zoom, *Space* resets zoom, hand tool to pan/select, *Delete* removes the selected box). Boxes save automatically with the label in the textbox. **Good images:** click around the part, then *Finish outline* |
 | 3 · Masks | *Make masks* (SAM = exact outline, or filled boxes) and check the red outlines |
 | 4 · Train | Pick steps (200 = quick check, 1000–3000 = real) → *Start training*; previews appear while it trains |
 | 5 · Generate | Pick how many images and defect shapes → *Generate*; results show mask (red) + YOLO box (green) |

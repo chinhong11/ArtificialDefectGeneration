@@ -20,6 +20,7 @@ from pathlib import Path
 import cv2
 import gradio as gr
 import numpy as np
+from gradio_image_annotation import image_annotator
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
@@ -31,6 +32,10 @@ from ui import annotations as A  # noqa: E402
 SD_MODEL = "stable-diffusion-v1-5/stable-diffusion-inpainting"
 SAM_MODEL = "facebook/sam-vit-base"
 MAX_LOG_LINES = 300
+# hide annotator tools that would break saved coordinates/labels (rotate) or can't show our labels
+CSS = """
+#annot button[aria-label^="Rotate"], #annot button[aria-label="Edit label"] { display: none !important; }
+"""
 
 
 # ---------------------------------------------------------------- helpers
@@ -166,10 +171,13 @@ def _load(project, name):
 
 
 MOVE = "Move view (click to centre)"
+ADD_POINT = "Add outline point"
+NEW_TAG = "(new)"   # shown on just-drawn boxes until the image is reloaded
+BOX_COLORS = [(255, 40, 40), (40, 120, 255), (255, 160, 0), (200, 0, 200), (0, 180, 180), (120, 80, 0)]
 
 
-def _kind(mode):
-    return "polygon" if mode.startswith("Part") else ("move" if mode == MOVE else "box")
+def _is_defect(name):
+    return bool(name) and name.startswith("defect_raw/")
 
 
 def _view(view, zoom):
@@ -178,43 +186,120 @@ def _view(view, zoom):
     return view
 
 
-def _show(img, ann, pending, kind, view):
-    """Render the (zoomed) view, scaled back up to full size so zoom really magnifies."""
+def _show(img, ann, pending, view):
+    """Render the (zoomed) outline view, scaled back up to full size so zoom really magnifies."""
     h, w = img.shape[:2]
     win = A.view_window(h, w, view.get("zoom", 1), view.get("center"))
-    out = A.render(img, ann, pending, "polygon" if kind == "polygon" else "box", window=win)
+    out = A.render(img, ann, pending, "polygon", window=win)
     if out.shape[:2] != (h, w):
         out = cv2.resize(out, (w, h), interpolation=cv2.INTER_LINEAR)
     return out, win
 
 
-def _hint(name, ann, pending, kind, view):
+def _hint(name, ann, pending=(), action=ADD_POINT, view=None):
     b, r = A.summary(ann)
-    if kind == "polygon":
-        step = f"outline: {len(pending)} point(s) - click around the part, then 'Finish outline'"
-    elif kind == "move":
-        step = "click where the view should be centred, then switch back to drawing"
-    else:
-        step = "click the 2nd corner" if pending else "click the 1st corner of a defect box"
-    z = view.get("zoom", 1)
-    return f"**{name}** - {b} box(es), {r} outline(s). Zoom {z}×. Next: {step}."
+    if _is_defect(name):
+        return (f"**{name}** - {b} defect box(es), saved automatically with the label above (new boxes "
+                f"show '{NEW_TAG}' until you switch image). **Drag** to draw a box, drag its "
+                f"corners to resize, **mouse wheel** to zoom (*Space* resets), hand tool or *D* to pan/select, then "
+                f"*Delete* removes the selected box.")
+    step = ("click where the view should be centred" if action == MOVE else
+            f"{len(pending)} point(s) - click around the part, then 'Finish outline'")
+    return f"**{name}** - {r} part outline(s). Zoom {(view or {}).get('zoom', 1)}×. Next: {step}."
 
 
-def show_image(project, name, mode, zoom, view):
+def _label_props(label, project):
+    labels = [label.strip() or "defect"] + [l for l in A.labels_in(proj(project) / "defect_raw")
+                                             if l != (label.strip() or "defect")]
+    return labels, [BOX_COLORS[i % len(BOX_COLORS)] for i in range(len(labels))]
+
+
+def _annotator_value(path, ann, labels, colors):
+    cmap = dict(zip(labels, colors))
+    boxes = []
+    for sh in ann["shapes"]:
+        if sh["shape_type"] == "rectangle":
+            (x0, y0), (x1, y1) = sh["points"]
+            boxes.append({"xmin": int(round(min(x0, x1))), "ymin": int(round(min(y0, y1))),
+                          "xmax": int(round(max(x0, x1))), "ymax": int(round(max(y0, y1))),
+                          "label": sh["label"], "color": cmap.get(sh["label"], BOX_COLORS[0])})
+    return {"image": str(path), "boxes": boxes}
+
+
+def show_image(project, name, label, zoom, view):
+    """Returns: annotator, canvas, pending, view, hint, box panel visible, outline panel visible."""
     if not name:
-        return None, [], view, "Upload images in tab 1 first."
-    _, img, ann = _load(project, name)
+        return (gr.skip(), None, [], view, "Upload images in tab 1 first.",
+                gr.Group(visible=False), gr.Group(visible=False))
+    path, img, ann = _load(project, name)
+    if _is_defect(name):
+        labels, colors = _label_props(label, project)
+        ann_value = _annotator_value(path, ann, labels, colors)
+        return (ann_value, gr.skip(), [], view, _hint(name, ann),
+                gr.Group(visible=True), gr.Group(visible=False))
     view = _view(view, zoom)
     if view.get("name") != name:  # new image: reset view centre
         view = {"zoom": view["zoom"], "name": name}
-    kind = _kind(mode)
-    out, _ = _show(img, ann, [], kind, view)
-    return out, [], view, _hint(name, ann, [], kind, view)
+    out, _ = _show(img, ann, [], view)
+    return (gr.skip(), out, [], view, _hint(name, ann, [], ADD_POINT, view),
+            gr.Group(visible=False), gr.Group(visible=True))
 
 
-def on_click(project, name, mode, label, pending, zoom, view, evt: gr.SelectData):
-    if not name:
-        return gr.skip(), pending, view, "Select an image first."
+def _iou(a, b):
+    ix = max(0, min(a[2], b[2]) - max(a[0], b[0]))
+    iy = max(0, min(a[3], b[3]) - max(a[1], b[1]))
+    inter = ix * iy
+    union = (a[2] - a[0]) * (a[3] - a[1]) + (b[2] - b[0]) * (b[3] - b[1]) - inter
+    return inter / union if union > 0 else 0.0
+
+
+def save_boxes(project, name, value, label):
+    """Annotator changed -> rewrite the rectangles in this image's JSON (outlines are kept).
+
+    The annotator can't change its label list after loading, so labels are decided here:
+    boxes matching a saved box (moved/resized) keep their saved label, new boxes get the
+    label from the textbox.
+    """
+    if not _is_defect(name) or not value or not value.get("image"):
+        return gr.skip()
+    if Path(str(value["image"])).name != Path(name).name:   # event from the previous image
+        return gr.skip()
+    path, img, ann = _load(project, name)
+    old = []
+    for sh in ann["shapes"]:
+        if sh["shape_type"] == "rectangle":
+            (ax, ay), (bx_, by_) = sh["points"]
+            old.append((sh["label"], (min(ax, bx_), min(ay, by_), max(ax, bx_), max(ay, by_))))
+    ann["shapes"] = [sh for sh in ann["shapes"] if sh["shape_type"] != "rectangle"]
+    h, w = img.shape[:2]
+    for bx in value.get("boxes") or []:
+        x0, x1 = sorted((min(max(bx["xmin"], 0), w), min(max(bx["xmax"], 0), w)))
+        y0, y1 = sorted((min(max(bx["ymin"], 0), h), min(max(bx["ymax"], 0), h)))
+        best = max(old, key=lambda o: _iou(o[1], (x0, y0, x1, y1)), default=None)
+        if best is not None and _iou(best[1], (x0, y0, x1, y1)) > 0.3:
+            old.remove(best)
+            lb = best[0]
+        else:
+            lb = label.strip() or "defect"
+        A.add_box(ann, lb, (x0, y0), (x1, y1))
+    A.save(path, ann)
+    return _hint(name, ann)
+
+
+def relabel_all(project, name, label, zoom, view):
+    """Give every box on this image the textbox label, then reload the annotator."""
+    if _is_defect(name):
+        path, _, ann = _load(project, name)
+        for sh in ann["shapes"]:
+            if sh["shape_type"] == "rectangle":
+                sh["label"] = label.strip() or "defect"
+        A.save(path, ann)
+    return show_image(project, name, label, zoom, view)
+
+
+def on_click(project, name, action, pending, zoom, view, evt: gr.SelectData):
+    if not name or _is_defect(name):
+        return gr.skip(), pending, view, gr.skip()
     path, img, ann = _load(project, name)
     view = _view(view, zoom)
     h, w = img.shape[:2]
@@ -222,65 +307,54 @@ def on_click(project, name, mode, label, pending, zoom, view, evt: gr.SelectData
     # the view is displayed at full size: displayed pixel -> full-image pixel
     x, y = round(x0 + evt.index[0] * vw / w), round(y0 + evt.index[1] * vh / h)
     pending = list(pending or [])
-    kind = _kind(mode)
-    msg = ""
-    if kind == "move":
+    if action == MOVE:
         view["center"] = (x, y)
-    elif kind == "box":
-        if not pending:
-            pending = [(x, y)]
-        else:
-            if A.add_box(ann, label, pending[0], (x, y)):
-                A.save(path, ann)
-            else:
-                msg = " (box too small, ignored)"
-            pending = []
     else:
         pending.append((x, y))
-    out, _ = _show(img, ann, pending, kind, view)
-    return out, pending, view, _hint(name, ann, pending, kind, view) + msg
+    out, _ = _show(img, ann, pending, view)
+    return out, pending, view, _hint(name, ann, pending, action, view)
 
 
 def finish_outline(project, name, pending, zoom, view):
-    if not name:
-        return gr.skip(), pending, view, "Select an image first."
+    if not name or _is_defect(name):
+        return gr.skip(), pending, view, gr.skip()
     path, img, ann = _load(project, name)
     view = _view(view, zoom)
+    msg = ""
     if A.add_polygon(ann, pending or []):
         A.save(path, ann)
         pending = []
-        msg = ""
     else:
         msg = " (need at least 3 points)"
-    out, _ = _show(img, ann, pending, "polygon", view)
-    return out, pending, view, _hint(name, ann, pending, "polygon", view) + msg
+    out, _ = _show(img, ann, pending, view)
+    return out, pending, view, _hint(name, ann, pending, ADD_POINT, view) + msg
 
 
-def undo(project, name, mode, pending, zoom, view):
-    if not name:
-        return gr.skip(), [], view, ""
+def undo(project, name, pending, zoom, view):
+    if not name or _is_defect(name):
+        return gr.skip(), pending, view, gr.skip()
     path, img, ann = _load(project, name)
     view = _view(view, zoom)
-    kind = _kind(mode)
     if pending:
         pending = list(pending)[:-1]
     else:
-        A.remove_last(ann)
-        A.save(path, ann)
-    out, _ = _show(img, ann, pending, kind, view)
-    return out, pending, view, _hint(name, ann, pending, kind, view)
+        polys = [i for i, sh in enumerate(ann["shapes"]) if sh["shape_type"] == "polygon"]
+        if polys:
+            ann["shapes"].pop(polys[-1])
+            A.save(path, ann)
+    out, _ = _show(img, ann, pending, view)
+    return out, pending, view, _hint(name, ann, pending, ADD_POINT, view)
 
 
-def clear_all(project, name, mode, zoom, view):
-    if not name:
-        return gr.skip(), [], view, ""
+def clear_all(project, name, zoom, view):
+    if not name or _is_defect(name):
+        return gr.skip(), [], view, gr.skip()
     path, img, ann = _load(project, name)
     view = _view(view, zoom)
-    ann["shapes"] = []
+    ann["shapes"] = [sh for sh in ann["shapes"] if sh["shape_type"] != "polygon"]
     A.save(path, ann)
-    kind = _kind(mode)
-    out, _ = _show(img, ann, [], kind, view)
-    return out, [], view, _hint(name, ann, [], kind, view)
+    out, _ = _show(img, ann, [], view)
+    return out, [], view, _hint(name, ann, [], ADD_POINT, view)
 
 
 def step_image(project, name, delta):
@@ -441,28 +515,34 @@ def build(default_project="data/my_project"):
             status = gr.Markdown(status_text(default_project))
 
         with gr.Tab("2 · Annotate"):
-            gr.Markdown("**Defect images:** draw a tight box around every defect (click 2 corners). "
-                        "Small defects: choose *Move view* and click the defect, pick Zoom 4×, then "
-                        "switch back to *Defect box*.  \n"
-                        "**Good images:** draw the part outline (click points around the part, then "
-                        "*Finish outline*) so new defects land on the part, not the background.")
+            gr.Markdown("**Defect images:** drag a tight box around every defect.  \n"
+                        "**Good images:** click points around the part, then *Finish outline* - so new defects "
+                        "land on the part, not the background.")
             with gr.Row():
                 first = image_choices(default_project)
                 img_sel = gr.Dropdown(first, value=first[0] if first else None, label="Image", scale=3)
                 btn_prev = gr.Button("◀ Prev", scale=0)
                 btn_next = gr.Button("Next ▶", scale=0)
-            with gr.Row():
-                mode = gr.Radio(["Defect box", "Part outline (good images)", MOVE], value="Defect box",
-                                label="Click action")
-                zoom = gr.Radio(["1×", "2×", "4×", "8×"], value="1×", label="Zoom (small defects: 4× or 8×)")
-                label = gr.Textbox("defect", label="Defect type label (e.g. particle, scratch)")
             hint = gr.Markdown()
-            canvas = gr.Image(type="numpy", interactive=False, label="Click on the image", height=650,
-                              elem_id="canvas")
-            with gr.Row():
-                btn_finish = gr.Button("Finish outline", variant="primary")
-                btn_undo = gr.Button("Undo")
-                btn_clear = gr.Button("Clear this image", variant="stop")
+            with gr.Group(visible=True) as box_panel:
+                with gr.Row():
+                    label = gr.Textbox("defect", label="Label for new boxes (e.g. particle, scratch)", scale=3)
+                    btn_relabel = gr.Button("Apply label to all boxes in this image", scale=1)
+                annot = image_annotator(None, label_list=[NEW_TAG], label_colors=[(255, 160, 0)],
+                                        use_default_label=True, sources=[], show_clear_button=False,
+                                        image_type="filepath",
+                                        box_min_size=3, handle_size=6, height=700, elem_id="annot",
+                                        label="Drag to draw · wheel to zoom · hand tool to pan")
+            with gr.Group(visible=False) as outline_panel:
+                with gr.Row():
+                    action = gr.Radio([ADD_POINT, MOVE], value=ADD_POINT, label="Click action")
+                    zoom = gr.Radio(["1×", "2×", "4×"], value="1×", label="Zoom")
+                canvas = gr.Image(type="numpy", interactive=False, label="Click around the part", height=650,
+                                  elem_id="canvas")
+                with gr.Row():
+                    btn_finish = gr.Button("Finish outline", variant="primary")
+                    btn_undo = gr.Button("Undo")
+                    btn_clear = gr.Button("Clear outline", variant="stop")
             pending = gr.State([])
             view = gr.State({})
 
@@ -515,15 +595,18 @@ def build(default_project="data/my_project"):
         btn_refresh.click(refresh, project, [status, img_sel])
         project.submit(refresh, project, [status, img_sel])
 
-        show_io = ([project, img_sel, mode, zoom, view], [canvas, pending, view, hint])
+        show_io = ([project, img_sel, label, zoom, view],
+                   [annot, canvas, pending, view, hint, box_panel, outline_panel])
         demo.load(show_image, *show_io)
         img_sel.change(show_image, *show_io)
-        mode.change(show_image, *show_io)
         zoom.change(show_image, *show_io)
-        canvas.select(on_click, [project, img_sel, mode, label, pending, zoom, view], [canvas, pending, view, hint])
-        btn_finish.click(finish_outline, [project, img_sel, pending, zoom, view], [canvas, pending, view, hint])
-        btn_undo.click(undo, [project, img_sel, mode, pending, zoom, view], [canvas, pending, view, hint])
-        btn_clear.click(clear_all, [project, img_sel, mode, zoom, view], [canvas, pending, view, hint])
+        annot.change(save_boxes, [project, img_sel, annot, label], hint)
+        btn_relabel.click(relabel_all, [project, img_sel, label, zoom, view], show_io[1])
+        out4 = [canvas, pending, view, hint]
+        canvas.select(on_click, [project, img_sel, action, pending, zoom, view], out4)
+        btn_finish.click(finish_outline, [project, img_sel, pending, zoom, view], out4)
+        btn_undo.click(undo, [project, img_sel, pending, zoom, view], out4)
+        btn_clear.click(clear_all, [project, img_sel, zoom, view], out4)
         btn_prev.click(lambda pr, n: step_image(pr, n, -1), [project, img_sel], img_sel)
         btn_next.click(lambda pr, n: step_image(pr, n, 1), [project, img_sel], img_sel)
 
@@ -544,7 +627,7 @@ def main():
     ap.add_argument("--port", type=int, default=7860)
     args = ap.parse_args()
     proj(args.project)
-    build(args.project).queue().launch(server_name=args.host, server_port=args.port,
+    build(args.project).queue().launch(server_name=args.host, server_port=args.port, css=CSS,
                                        allowed_paths=[str(proj(args.project))])
 
 

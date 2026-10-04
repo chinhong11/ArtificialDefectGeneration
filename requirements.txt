@@ -14,6 +14,7 @@ safetensors
 
 # UI (python -m ui.app)
 gradio>=5
+gradio_image_annotation   # drag-to-draw boxes in the UI
 
 # Optional
 bitsandbytes   # --use-8bit-adam (Linux + CUDA)

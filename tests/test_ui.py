@@ -71,7 +71,7 @@ class _Click:
         self.index = [x, y]
 
 
-def test_ui_builds_and_annotates_with_zoom(tmp_path):
+def test_ui_builds_boxes_and_outline(tmp_path):
     from ui import app
     for sub in ("good", "defect_raw"):
         (tmp_path / sub).mkdir()
@@ -79,22 +79,44 @@ def test_ui_builds_and_annotates_with_zoom(tmp_path):
     cv2.imwrite(str(tmp_path / "good/g.png"), np.full((1500, 2000, 3), 128, np.uint8))
     app.build(str(tmp_path))
     pr, name = str(tmp_path), "defect_raw/d.png"
-    img, pend, view, _ = app.show_image(pr, name, "Defect box", "1×", {})
+
+    # defect image -> annotator panel visible, empty boxes
+    ann_v, _, _, _, hint, box_panel, outline_panel = app.show_image(pr, name, "particle", "1×", {})
+    assert ann_v["boxes"] == [] and "0 defect box(es)" in hint
+
+    # drag-drawn box arrives from the annotator (with its own default label) -> saved with textbox label
+    v = {"image": "/tmp/gradio/abc/d.png", "boxes": [{"xmin": 1583, "ymin": 576, "xmax": 1609, "ymax": 602,
+                                                      "label": app.NEW_TAG}]}
+    app.save_boxes(pr, name, v, "particle")
+    # moving/resizing it keeps its saved label even if the textbox label changed
+    v["boxes"][0].update(xmin=1580, xmax=1612)
+    app.save_boxes(pr, name, v, "scratch")
+    shapes = json.loads((tmp_path / "defect_raw/d.json").read_text())["shapes"]
+    assert [(s["label"], s["points"]) for s in shapes] == [("particle", [[1580.0, 576.0], [1612.0, 602.0]])]
+    # event from another image is ignored (stale event while switching images)
+    app.save_boxes(pr, name, {"image": "/tmp/x/other.png", "boxes": []}, "particle")
+    assert (tmp_path / "defect_raw/d.json").exists()
+    # relabel all
+    app.relabel_all(pr, name, "scratch", "1×", {})
+    assert json.loads((tmp_path / "defect_raw/d.json").read_text())["shapes"][0]["label"] == "scratch"
+    # reload shows the saved box
+    ann_v = app.show_image(pr, name, "particle", "1×", {})[0]
+    assert ann_v["boxes"][0]["label"] == "scratch" and ann_v["boxes"][0]["xmin"] == 1580
+    # deleting all boxes removes the JSON
+    app.save_boxes(pr, name, {"image": "d.png", "boxes": []}, "particle")
+    assert not (tmp_path / "defect_raw/d.json").exists()
+
+    # good image -> outline by clicks, with zoom + move view
+    g = "good/g.png"
+    _, img, pend, view, _, _, _ = app.show_image(pr, g, "particle", "1×", {})
     assert img.shape == (1500, 2000, 3)
-    # centre on the defect, zoom 4x, then click 2 corners on the displayed (upscaled) view
-    _, pend, view, _ = app.on_click(pr, name, app.MOVE, "particle", pend, "1×", view, _Click(1596, 589))
-    img, pend, view, _ = app.show_image(pr, name, "Defect box", "4×", view)
-    assert img.shape == (1500, 2000, 3)                              # zoomed view displayed at full size
-    x0, y0 = 1346, 401
-    to_disp = lambda x, y: _Click((x - x0) * 4, (y - y0) * 4)      # noqa: E731
-    _, pend, view, _ = app.on_click(pr, name, "Defect box", "particle", pend, "4×", view, to_disp(1583, 576))
-    _, pend, view, hint = app.on_click(pr, name, "Defect box", "particle", pend, "4×", view, to_disp(1609, 602))
-    pts = json.loads((tmp_path / "defect_raw/d.json").read_text())["shapes"][0]["points"]
-    assert pts == [[1583.0, 576.0], [1609.0, 602.0]] and "1 box(es)" in hint
-    # outline on the good image
-    pend = []
     for x, y in [(100, 100), (1900, 100), (1900, 1400)]:
-        _, pend, view, _ = app.on_click(pr, "good/g.png", "Part outline (good images)", "x", pend, "1×", {},
-                                        _Click(x, y))
-    app.finish_outline(pr, "good/g.png", pend, "1×", {})
+        _, pend, view, _ = app.on_click(pr, g, app.ADD_POINT, pend, "1×", view, _Click(x, y))
+    app.finish_outline(pr, g, pend, "1×", view)
     assert "1 with part outline" in app.status_text(pr)
+    _, pend, view, _ = app.on_click(pr, g, app.MOVE, [], "1×", view, _Click(1596, 589))
+    _, img, pend, view, _, _, _ = app.show_image(pr, g, "particle", "4×", view)
+    assert img.shape == (1500, 2000, 3)                              # zoomed view displayed at full size
+    # click at displayed (0, 0) of the 4x view centred on (1596, 589) -> image (1346, 401)
+    _, pend, view, _ = app.on_click(pr, g, app.ADD_POINT, [], "4×", view, _Click(0, 0))
+    assert pend == [(1346, 401)]
