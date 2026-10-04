@@ -36,7 +36,7 @@ Everything runs on your own PC; images never leave it. Work through the tabs lef
 
 | Tab | What you do |
 |---|---|
-| 1 · Images | Upload **good images** (no labels needed; empty YOLO `.txt` files are fine) and **defect images together with their label files** (or a `.zip`). Supported: YOLO `.txt` boxes or segmentation polygons (+ `classes.txt` / `data.yaml`), Pascal VOC `.xml`, COCO `.json`, labelme `.json` |
+| 1 · Images | Upload **good images** (just the images or a `.zip`; no labels needed, everything here is treated as good) and **defect images together with their label files** (or a `.zip`). Supported: YOLO `.txt` boxes or segmentation polygons (+ `classes.txt` / `data.yaml`), Pascal VOC `.xml`, COCO `.json`, labelme `.json` |
 | 2 · Annotate | Check / fix defect boxes, or draw them for defect images that came without labels: drag to draw, drag corners to resize, mouse wheel to zoom (*Space* resets), hand tool to select/pan, *Delete* removes the selected box. Saved automatically. Good images are never annotated |
 | 3 · Masks | *Make masks* (SAM = exact outline, or filled boxes) and check the red outlines |
 | 4 · Train | Pick steps (200 = quick check, 1000–3000 = real) → *Start training*; previews appear while it trains |

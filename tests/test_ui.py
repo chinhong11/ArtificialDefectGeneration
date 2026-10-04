@@ -64,7 +64,7 @@ def test_ui_upload_with_labels_annotate_and_roi(tmp_path):
     pr = str(tmp_path)
 
     msg, status = app.upload_good(pr, [str(src / "good/g1.png"), str(src / "good/g1.txt")])
-    assert "Added 1 good" in msg and "Warning" not in msg
+    assert "Added 1 good" in msg and not (tmp_path / "good/g1.txt").exists()   # labels ignored
     files = [str(src / f) for f in ("d1.png", "d2.png", "d3.png", "d1.txt", "d2.txt", "classes.txt")]
     msg, status, _ = app.upload_defects(pr, files)
     assert "3 image(s): 2 labelled (1 box(es), 1 polygon(s))" in msg and "d3.png" in msg
@@ -104,7 +104,7 @@ def test_ui_upload_with_labels_annotate_and_roi(tmp_path):
     assert len(app.preview_roi(pr, 6)) == 1
 
 
-def test_upload_zip_and_warn_on_labelled_good_image(tmp_path):
+def test_upload_zips(tmp_path):
     import zipfile
     from ui import app
     src = _project(tmp_path)
@@ -114,6 +114,9 @@ def test_upload_zip_and_warn_on_labelled_good_image(tmp_path):
             zf.write(src / f, f"dataset/{f}")
     msg, _, _ = app.upload_defects(str(tmp_path), [str(z)])
     assert "1 labelled (1 box(es)" in msg
-    (src / "good/g1.txt").write_text("0 0.5 0.5 0.1 0.1\n")
-    msg, _ = app.upload_good(str(tmp_path), [str(src / "good/g1.png"), str(src / "good/g1.txt")])
-    assert "Warning" in msg and "g1.png" in msg
+    zg = tmp_path / "good.zip"
+    with zipfile.ZipFile(zg, "w") as zf:
+        zf.write(src / "good/g1.png", "good/g1.png")
+        zf.write(src / "good/g1.txt", "good/g1.txt")
+    msg, _ = app.upload_good(str(tmp_path), [str(zg)])
+    assert "Added 1 good" in msg

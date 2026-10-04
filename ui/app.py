@@ -179,20 +179,14 @@ def _expand(files, tmp):
 
 
 def upload_good(project, files):
+    """Everything uploaded here is a good image; any non-image files (labels etc.) are ignored."""
     import tempfile
-    from src.label_import import has_defect_labels
     p = proj(project)
     with tempfile.TemporaryDirectory() as tmp:
-        paths = _expand(files, tmp)
-        imgs = [q for q in paths if q.suffix.lower() in IMG_EXTS]
-        labels = [q for q in paths if q.suffix.lower() in {".txt", ".xml"}]
-        warn = [q.name for q in imgs if has_defect_labels(labels, q.stem)]
+        imgs = [q for q in _expand(files, tmp) if q.suffix.lower() in IMG_EXTS]
         for q in imgs:
             shutil.copy2(q, p / "good" / q.name)
-    msg = f"Added {len(imgs)} good image(s)."
-    if warn:
-        msg += f"  \n**Warning:** these 'good' images have non-empty labels (defects?): {', '.join(warn[:10])}"
-    return msg, status_text(project)
+    return f"Added {len(imgs)} good image(s).", status_text(project)
 
 
 def upload_defects(project, files):
@@ -478,11 +472,11 @@ def build(default_project="data/my_project"):
                 "together**, or upload a **.zip**.  \n"
                 "Supported labels: **YOLO** `.txt` (boxes or segmentation polygons, + `classes.txt`/`data.yaml` "
                 "for names), **Pascal VOC** `.xml`, **COCO** `.json`, **labelme** `.json`. "
-                "Defect images without a label file can be boxed in tab 2. Good images need no labels "
-                "(empty YOLO `.txt` files are fine).")
+                "Defect images without a label file can be boxed in tab 2. Good images need no labels - "
+                "everything uploaded as good is treated as good.")
             with gr.Row():
                 with gr.Column():
-                    up_good = gr.File(file_count="multiple", label="Good images (labels optional / empty)")
+                    up_good = gr.File(file_count="multiple", label="Good images (or a .zip) - no labels needed")
                     btn_good = gr.Button("Add good images")
                 with gr.Column():
                     up_def = gr.File(file_count="multiple", label="Defect images + label files (or a .zip)")

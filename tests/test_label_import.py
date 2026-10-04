@@ -10,7 +10,7 @@ import pytest
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 
-from src.label_import import format_report, has_defect_labels, import_labels  # noqa: E402
+from src.label_import import format_report, import_labels  # noqa: E402
 from src.roi import auto_part_mask  # noqa: E402
 
 W, H = 200, 100
@@ -94,13 +94,6 @@ def test_labelme_passthrough_and_cli(tmp_path):
                        cwd=ROOT, capture_output=True, text=True)
     assert r.returncode == 0, r.stderr
     assert _shapes(img) == [("pit", "rectangle", [[1.0, 2.0], [30.0, 40.0]])]
-
-
-def test_has_defect_labels(tmp_path):
-    (tmp_path / "g1.txt").write_text("")
-    (tmp_path / "g2.txt").write_text("0 0.5 0.5 0.1 0.1\n")
-    files = [tmp_path / "g1.txt", tmp_path / "g2.txt"]
-    assert not has_defect_labels(files, "g1") and has_defect_labels(files, "g2")
 
 
 def test_auto_part_mask_on_backlit_scene():

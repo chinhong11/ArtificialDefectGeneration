@@ -7,7 +7,7 @@ Supported (auto-detected per file):
   - COCO               *.json       {"images", "annotations", "categories"} (bbox and/or polygons)
   - labelme            <stem>.json  {"shapes": [...]}  (used as is)
 Class names for YOLO come from classes.txt / obj.names / data.yaml (names); otherwise
-"class0", "class1", ...  An empty YOLO .txt means "no defect" (fine for good images).
+"class0", "class1", ...  An empty YOLO .txt means "no defect on this image".
 
 Everything is converted to labelme JSON next to each image (rectangles for boxes,
 polygons for segmentation), which every other step of the pipeline reads.
@@ -169,16 +169,6 @@ def import_labels(images, label_files, keep_existing=False):
         report["boxes"] += sum(s["shape_type"] == "rectangle" for s in shapes)
         report["polygons"] += sum(s["shape_type"] == "polygon" for s in shapes)
     return report
-
-
-def has_defect_labels(label_files, image_stem):
-    """True if a YOLO/VOC/labelme file for this image contains any object (used to warn on good images)."""
-    for f in map(Path, label_files):
-        if f.stem == image_stem and f.suffix.lower() == ".txt":
-            return any(l.strip() for l in f.read_text(encoding="utf-8").splitlines())
-        if f.stem == image_stem and f.suffix.lower() == ".xml":
-            return bool(parse_voc(f))
-    return False
 
 
 def format_report(r):
