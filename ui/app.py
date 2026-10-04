@@ -5,8 +5,9 @@
 
 Tabs: 1 Images -> 2 Annotate -> 3 Masks -> 4 Train -> 5 Generate -> 6 Export.
 Everything is stored in a project folder (default data/my_project):
-    good/  defect_raw/          your images + labelme-style JSON annotations
-    work/                       masks, crops, ROI masks, LoRA weights
+    good/                       good images (no labels needed)
+    defect_raw/                 defect images + labelme-style JSON (imported from YOLO/VOC/COCO or drawn)
+    work/                       masks, crops, auto part masks, LoRA weights
     generated/<label>/          synthetic images, masks, YOLO labels
 """
 import argparse
@@ -32,6 +33,11 @@ from ui import annotations as A  # noqa: E402
 SD_MODEL = "stable-diffusion-v1-5/stable-diffusion-inpainting"
 SAM_MODEL = "facebook/sam-vit-base"
 MAX_LOG_LINES = 300
+# the annotator opens in pan mode after an image loads; switch it to "Create box" so dragging draws
+CREATE_MODE_JS = """() => { let n = 0; const t = setInterval(() => {
+  const b = document.querySelector('#annot button[aria-label="Create box"]');
+  if (b && document.querySelector('#annot canvas')) { b.click(); clearInterval(t); }
+  if (++n > 30) clearInterval(t); }, 100); }"""
 # hide annotator tools that would break saved coordinates/labels (rotate) or can't show our labels
 CSS = """
 #annot button[aria-label^="Rotate"], #annot button[aria-label="Edit label"] { display: none !important; }
@@ -49,26 +55,18 @@ def proj(path):
 
 
 def image_choices(project):
-    p = proj(project)
-    return [f"defect_raw/{x.name}" for x in list_images(p / "defect_raw")] + \
-           [f"good/{x.name}" for x in list_images(p / "good")]
+    """Only defect images are annotated."""
+    return [f"defect_raw/{x.name}" for x in list_images(proj(project) / "defect_raw")]
 
 
 def status_text(project):
     p = proj(project)
-    lines = []
-    for sub, what in (("defect_raw", "boxes"), ("good", "part outline")):
-        imgs = list_images(p / sub)
-        done = 0
-        for im in imgs:
-            jp = A.json_path(im)
-            if jp.exists():
-                b, r = A.summary(A.load(im, (1, 1)))
-                done += (b > 0) if sub == "defect_raw" else (r > 0)
-        lines.append(f"**{sub}/**: {len(imgs)} images, {done} with {what}")
+    defects = list_images(p / "defect_raw")
+    labelled = sum(sum(A.summary(A.load(im, (1, 1)))) > 0 for im in defects if A.json_path(im).exists())
     labels = A.labels_in(p / "defect_raw")
-    lines.append(f"**defect labels:** {', '.join(labels) if labels else '(none yet)'}")
-    return "  \n".join(lines)
+    return (f"**good/**: {len(list_images(p / 'good'))} images (no labels needed)  \n"
+            f"**defect_raw/**: {len(defects)} images, {labelled} with defect labels  \n"
+            f"**defect labels:** {', '.join(labels) if labels else '(none yet)'}")
 
 
 def gpu_text():
@@ -130,31 +128,90 @@ def label_choices(project):
     return gr.Dropdown(choices=labels, value=labels[0] if labels else None)
 
 
-def build_roi_masks(p):
-    """good/*.json polygons labelled roi -> work/roi/roi/*.png ; returns dir or None."""
-    if not any((p / "good").glob("*.json")):
-        return None, ""
-    log = ""
-    for log in stream(["scripts/labelme_to_masks.py", "--json-dir", p / "good", "--out-dir", p / "work" / "roi",
-                       "--labels", A.ROI_LABEL]):
-        pass
-    d = p / "work" / "roi" / A.ROI_LABEL
-    return (d if d.is_dir() else None), log
+def build_auto_roi(p, sensitivity):
+    """Auto-detect the part on every good image -> work/roi_auto/<stem>.png. Returns (dir, coverage text)."""
+    from src.roi import auto_part_mask
+    from src.common import write_mask
+    out = p / "work" / "roi_auto"
+    shutil.rmtree(out, ignore_errors=True)
+    cov = []
+    for im in list_images(p / "good"):
+        m = auto_part_mask(read_rgb(im), sensitivity)
+        write_mask(out / f"{im.stem}.png", m)
+        cov.append(f"{im.name}: {100 * (m > 0).mean():.0f}%")
+    return out, "part area: " + ", ".join(cov)
+
+
+def preview_roi(project, sensitivity):
+    p = proj(project)
+    from src.roi import auto_part_mask
+    items = []
+    for im in list_images(p / "good")[:24]:
+        img = read_rgb(im)
+        m = auto_part_mask(img, sensitivity)
+        ov = img.copy()
+        ov[m > 0] = (0.6 * ov[m > 0] + 0.4 * np.array([0, 200, 0])).astype(np.uint8)
+        s_ = 600 / max(ov.shape[:2])
+        items.append((cv2.resize(ov, None, fx=s_, fy=s_) if s_ < 1 else ov,
+                      f"{im.name}: {100 * (m > 0).mean():.0f}%"))
+    return items
 
 
 # ---------------------------------------------------------------- tab 1: images
 
-def upload(project, files, sub):
-    p = proj(project)
-    n = 0
+IMG_EXTS = {".png", ".jpg", ".jpeg", ".bmp", ".tif", ".tiff", ".webp"}
+
+
+def _expand(files, tmp):
+    """Uploaded files (+ contents of any .zip) -> list of Paths."""
+    import zipfile
+    out = []
     for f in files or []:
         src = Path(f if isinstance(f, str) else f.name)
-        if src.suffix.lower() in {".png", ".jpg", ".jpeg", ".bmp", ".tif", ".tiff", ".webp"}:
-            shutil.copy2(src, p / sub / src.name)
-            n += 1
+        if src.suffix.lower() == ".zip":
+            d = Path(tmp) / src.stem
+            with zipfile.ZipFile(src) as z:
+                z.extractall(d)
+            out += [q for q in d.rglob("*") if q.is_file() and "__MACOSX" not in q.parts]
+        else:
+            out.append(src)
+    return out
+
+
+def upload_good(project, files):
+    import tempfile
+    from src.label_import import has_defect_labels
+    p = proj(project)
+    with tempfile.TemporaryDirectory() as tmp:
+        paths = _expand(files, tmp)
+        imgs = [q for q in paths if q.suffix.lower() in IMG_EXTS]
+        labels = [q for q in paths if q.suffix.lower() in {".txt", ".xml"}]
+        warn = [q.name for q in imgs if has_defect_labels(labels, q.stem)]
+        for q in imgs:
+            shutil.copy2(q, p / "good" / q.name)
+    msg = f"Added {len(imgs)} good image(s)."
+    if warn:
+        msg += f"  \n**Warning:** these 'good' images have non-empty labels (defects?): {', '.join(warn[:10])}"
+    return msg, status_text(project)
+
+
+def upload_defects(project, files):
+    import tempfile
+    from src.label_import import CLASS_FILES, LABEL_EXTS, format_report, import_labels
+    p = proj(project)
+    with tempfile.TemporaryDirectory() as tmp:
+        paths = _expand(files, tmp)
+        imgs = []
+        for q in paths:
+            if q.suffix.lower() in IMG_EXTS:
+                shutil.copy2(q, p / "defect_raw" / q.name)
+                imgs.append(p / "defect_raw" / q.name)
+        labels = [q for q in paths if q.suffix.lower() in LABEL_EXTS or q.name.lower() in CLASS_FILES]
+        report = import_labels(imgs, labels) if imgs else None
     choices = image_choices(project)
-    return (f"Added {n} image(s) to {sub}/", status_text(project),
-            gr.Dropdown(choices=choices, value=choices[0] if choices else None))
+    msg = (f"Added {len(imgs)} defect image(s).  \n" + format_report(report).replace("\n", "  \n")
+           if report else "No images found in the upload.")
+    return msg, status_text(project), gr.Dropdown(choices=choices, value=choices[0] if choices else None)
 
 
 def refresh(project):
@@ -162,7 +219,12 @@ def refresh(project):
     return status_text(project), gr.Dropdown(choices=choices, value=choices[0] if choices else None)
 
 
-# ---------------------------------------------------------------- tab 2: annotate
+# ---------------------------------------------------------------- tab 2: annotate (defect images only)
+
+NEW_TAG = "(new)"   # shown on just-drawn boxes until the image is reloaded
+POLY_TAG = " (polygon)"
+BOX_COLORS = [(255, 40, 40), (40, 120, 255), (255, 160, 0), (200, 0, 200), (0, 180, 180), (120, 80, 0)]
+
 
 def _load(project, name):
     path = proj(project) / name
@@ -170,79 +232,9 @@ def _load(project, name):
     return path, img, A.load(path, img.shape)
 
 
-MOVE = "Move view (click to centre)"
-ADD_POINT = "Add outline point"
-NEW_TAG = "(new)"   # shown on just-drawn boxes until the image is reloaded
-BOX_COLORS = [(255, 40, 40), (40, 120, 255), (255, 160, 0), (200, 0, 200), (0, 180, 180), (120, 80, 0)]
-
-
-def _is_defect(name):
-    return bool(name) and name.startswith("defect_raw/")
-
-
-def _view(view, zoom):
-    view = dict(view or {})
-    view["zoom"] = int(str(zoom).rstrip("×x") or 1)
-    return view
-
-
-def _show(img, ann, pending, view):
-    """Render the (zoomed) outline view, scaled back up to full size so zoom really magnifies."""
-    h, w = img.shape[:2]
-    win = A.view_window(h, w, view.get("zoom", 1), view.get("center"))
-    out = A.render(img, ann, pending, "polygon", window=win)
-    if out.shape[:2] != (h, w):
-        out = cv2.resize(out, (w, h), interpolation=cv2.INTER_LINEAR)
-    return out, win
-
-
-def _hint(name, ann, pending=(), action=ADD_POINT, view=None):
-    b, r = A.summary(ann)
-    if _is_defect(name):
-        return (f"**{name}** - {b} defect box(es), saved automatically with the label above (new boxes "
-                f"show '{NEW_TAG}' until you switch image). **Drag** to draw a box, drag its "
-                f"corners to resize, **mouse wheel** to zoom (*Space* resets), hand tool or *D* to pan/select, then "
-                f"*Delete* removes the selected box.")
-    step = ("click where the view should be centred" if action == MOVE else
-            f"{len(pending)} point(s) - click around the part, then 'Finish outline'")
-    return f"**{name}** - {r} part outline(s). Zoom {(view or {}).get('zoom', 1)}×. Next: {step}."
-
-
-def _label_props(label, project):
-    labels = [label.strip() or "defect"] + [l for l in A.labels_in(proj(project) / "defect_raw")
-                                             if l != (label.strip() or "defect")]
-    return labels, [BOX_COLORS[i % len(BOX_COLORS)] for i in range(len(labels))]
-
-
-def _annotator_value(path, ann, labels, colors):
-    cmap = dict(zip(labels, colors))
-    boxes = []
-    for sh in ann["shapes"]:
-        if sh["shape_type"] == "rectangle":
-            (x0, y0), (x1, y1) = sh["points"]
-            boxes.append({"xmin": int(round(min(x0, x1))), "ymin": int(round(min(y0, y1))),
-                          "xmax": int(round(max(x0, x1))), "ymax": int(round(max(y0, y1))),
-                          "label": sh["label"], "color": cmap.get(sh["label"], BOX_COLORS[0])})
-    return {"image": str(path), "boxes": boxes}
-
-
-def show_image(project, name, label, zoom, view):
-    """Returns: annotator, canvas, pending, view, hint, box panel visible, outline panel visible."""
-    if not name:
-        return (gr.skip(), None, [], view, "Upload images in tab 1 first.",
-                gr.Group(visible=False), gr.Group(visible=False))
-    path, img, ann = _load(project, name)
-    if _is_defect(name):
-        labels, colors = _label_props(label, project)
-        ann_value = _annotator_value(path, ann, labels, colors)
-        return (ann_value, gr.skip(), [], view, _hint(name, ann),
-                gr.Group(visible=True), gr.Group(visible=False))
-    view = _view(view, zoom)
-    if view.get("name") != name:  # new image: reset view centre
-        view = {"zoom": view["zoom"], "name": name}
-    out, _ = _show(img, ann, [], view)
-    return (gr.skip(), out, [], view, _hint(name, ann, [], ADD_POINT, view),
-            gr.Group(visible=False), gr.Group(visible=True))
+def _bbox(points):
+    xs, ys = [q[0] for q in points], [q[1] for q in points]
+    return min(xs), min(ys), max(xs), max(ys)
 
 
 def _iou(a, b):
@@ -253,108 +245,83 @@ def _iou(a, b):
     return inter / union if union > 0 else 0.0
 
 
+def _hint(name, ann):
+    b, pl = A.summary(ann)
+    extra = f" and {pl} polygon(s) (shown as boxes tagged '{POLY_TAG.strip()}')" if pl else ""
+    return (f"**{name}** - {b} box(es){extra}, saved automatically. New boxes get the label above and show "
+            f"'{NEW_TAG}' until you switch image. **Drag** to draw, drag corners to resize, **mouse wheel** to "
+            f"zoom (*Space* resets), hand tool or *D* to select/pan, *Delete* removes the selected box.")
+
+
+def _annotator_value(path, ann, project):
+    labels = A.labels_in(proj(project) / "defect_raw")
+    cmap = {lb: BOX_COLORS[i % len(BOX_COLORS)] for i, lb in enumerate(labels)}
+    boxes = []
+    for sh in ann["shapes"]:
+        if sh["shape_type"] not in ("rectangle", "polygon") or sh["label"] == A.ROI_LABEL:
+            continue
+        x0, y0, x1, y1 = _bbox(sh["points"])
+        tag = POLY_TAG if sh["shape_type"] == "polygon" else ""
+        boxes.append({"xmin": int(round(x0)), "ymin": int(round(y0)), "xmax": int(round(x1)),
+                      "ymax": int(round(y1)), "label": sh["label"] + tag,
+                      "color": "rgb({}, {}, {})".format(*cmap.get(sh["label"], BOX_COLORS[0]))})
+    return {"image": str(path), "boxes": boxes}
+
+
+def show_image(project, name):
+    if not name:
+        return gr.skip(), "Upload defect images in tab 1 first."
+    path, _, ann = _load(project, name)
+    return _annotator_value(path, ann, project), _hint(name, ann)
+
+
 def save_boxes(project, name, value, label):
-    """Annotator changed -> rewrite the rectangles in this image's JSON (outlines are kept).
+    """Annotator changed -> rewrite this image's JSON.
 
     The annotator can't change its label list after loading, so labels are decided here:
-    boxes matching a saved box (moved/resized) keep their saved label, new boxes get the
-    label from the textbox.
+    a box matching an imported polygon keeps the polygon (deleting the box deletes it), a box
+    matching a saved box (moved/resized) keeps its label, a new box gets the textbox label.
     """
-    if not _is_defect(name) or not value or not value.get("image"):
+    if not name or not value or not value.get("image"):
         return gr.skip()
-    if Path(str(value["image"])).name != Path(name).name:   # event from the previous image
+    if Path(str(value["image"])).name != Path(name).name:   # stale event from the previous image
         return gr.skip()
     path, img, ann = _load(project, name)
-    old = []
-    for sh in ann["shapes"]:
-        if sh["shape_type"] == "rectangle":
-            (ax, ay), (bx_, by_) = sh["points"]
-            old.append((sh["label"], (min(ax, bx_), min(ay, by_), max(ax, bx_), max(ay, by_))))
-    ann["shapes"] = [sh for sh in ann["shapes"] if sh["shape_type"] != "rectangle"]
+    polys = [sh for sh in ann["shapes"] if sh["shape_type"] == "polygon" and sh["label"] != A.ROI_LABEL]
+    rects = [sh for sh in ann["shapes"] if sh["shape_type"] == "rectangle"]
+    keep = [sh for sh in ann["shapes"] if sh not in polys and sh not in rects]
     h, w = img.shape[:2]
+    new_label = label.strip() or "defect"
     for bx in value.get("boxes") or []:
         x0, x1 = sorted((min(max(bx["xmin"], 0), w), min(max(bx["xmax"], 0), w)))
         y0, y1 = sorted((min(max(bx["ymin"], 0), h), min(max(bx["ymax"], 0), h)))
-        best = max(old, key=lambda o: _iou(o[1], (x0, y0, x1, y1)), default=None)
-        if best is not None and _iou(best[1], (x0, y0, x1, y1)) > 0.3:
-            old.remove(best)
-            lb = best[0]
+        box = (x0, y0, x1, y1)
+        pm = max(polys, key=lambda sh: _iou(_bbox(sh["points"]), box), default=None)
+        if pm is not None and _iou(_bbox(pm["points"]), box) > 0.9:
+            polys.remove(pm)
+            keep.append(pm)
+            continue
+        rm = max(rects, key=lambda sh: _iou(_bbox(sh["points"]), box), default=None)
+        if rm is not None and _iou(_bbox(rm["points"]), box) > 0.3:
+            rects.remove(rm)
+            lb = rm["label"]
         else:
-            lb = label.strip() or "defect"
-        A.add_box(ann, lb, (x0, y0), (x1, y1))
+            lb = new_label
+        A.add_box({"shapes": keep}, lb, (x0, y0), (x1, y1))   # appends to keep
+    ann["shapes"] = keep
     A.save(path, ann)
     return _hint(name, ann)
 
 
-def relabel_all(project, name, label, zoom, view):
-    """Give every box on this image the textbox label, then reload the annotator."""
-    if _is_defect(name):
+def relabel_all(project, name, label):
+    """Give every box/polygon on this image the textbox label, then reload the annotator."""
+    if name:
         path, _, ann = _load(project, name)
         for sh in ann["shapes"]:
-            if sh["shape_type"] == "rectangle":
+            if sh["label"] != A.ROI_LABEL:
                 sh["label"] = label.strip() or "defect"
         A.save(path, ann)
-    return show_image(project, name, label, zoom, view)
-
-
-def on_click(project, name, action, pending, zoom, view, evt: gr.SelectData):
-    if not name or _is_defect(name):
-        return gr.skip(), pending, view, gr.skip()
-    path, img, ann = _load(project, name)
-    view = _view(view, zoom)
-    h, w = img.shape[:2]
-    x0, y0, vw, vh = A.view_window(h, w, view["zoom"], view.get("center"))
-    # the view is displayed at full size: displayed pixel -> full-image pixel
-    x, y = round(x0 + evt.index[0] * vw / w), round(y0 + evt.index[1] * vh / h)
-    pending = list(pending or [])
-    if action == MOVE:
-        view["center"] = (x, y)
-    else:
-        pending.append((x, y))
-    out, _ = _show(img, ann, pending, view)
-    return out, pending, view, _hint(name, ann, pending, action, view)
-
-
-def finish_outline(project, name, pending, zoom, view):
-    if not name or _is_defect(name):
-        return gr.skip(), pending, view, gr.skip()
-    path, img, ann = _load(project, name)
-    view = _view(view, zoom)
-    msg = ""
-    if A.add_polygon(ann, pending or []):
-        A.save(path, ann)
-        pending = []
-    else:
-        msg = " (need at least 3 points)"
-    out, _ = _show(img, ann, pending, view)
-    return out, pending, view, _hint(name, ann, pending, ADD_POINT, view) + msg
-
-
-def undo(project, name, pending, zoom, view):
-    if not name or _is_defect(name):
-        return gr.skip(), pending, view, gr.skip()
-    path, img, ann = _load(project, name)
-    view = _view(view, zoom)
-    if pending:
-        pending = list(pending)[:-1]
-    else:
-        polys = [i for i, sh in enumerate(ann["shapes"]) if sh["shape_type"] == "polygon"]
-        if polys:
-            ann["shapes"].pop(polys[-1])
-            A.save(path, ann)
-    out, _ = _show(img, ann, pending, view)
-    return out, pending, view, _hint(name, ann, pending, ADD_POINT, view)
-
-
-def clear_all(project, name, zoom, view):
-    if not name or _is_defect(name):
-        return gr.skip(), [], view, gr.skip()
-    path, img, ann = _load(project, name)
-    view = _view(view, zoom)
-    ann["shapes"] = [sh for sh in ann["shapes"] if sh["shape_type"] != "polygon"]
-    A.save(path, ann)
-    out, _ = _show(img, ann, [], view)
-    return out, [], view, _hint(name, ann, [], ADD_POINT, view)
+    return show_image(project, name)
 
 
 def step_image(project, name, delta):
@@ -436,7 +403,7 @@ def train(project, label, steps, rank, lr, crops_per_image, sd_model):
 
 # ---------------------------------------------------------------- tab 5: generate
 
-def generate(project, label, use_lora, num, mask_mode, lora_scale, infer_steps, sd_model):
+def generate(project, label, use_lora, num, mask_mode, lora_scale, infer_steps, sd_model, use_roi, roi_sens):
     p = proj(project)
     if not label:
         yield "No defect label - draw boxes (tab 2) and make masks (tab 3) first.", []
@@ -447,9 +414,12 @@ def generate(project, label, use_lora, num, mask_mode, lora_scale, infer_steps, 
         return
     out = p / "generated" / label
     shutil.rmtree(out, ignore_errors=True)
-    roi_dir, log = build_roi_masks(p)
-    if roi_dir is None:
-        log += "\nWARNING: no part outlines on good images - defects may land on the background.\n"
+    roi_dir, log = None, ""
+    if use_roi:
+        roi_dir, cov = build_auto_roi(p, roi_sens)
+        log = f"Auto-detected part area on good images ({cov})\n"
+    else:
+        log = "Part restriction off - defects may land on the background.\n"
     real_masks = p / "work" / "crops" / label / "masks"
     cmd = ["-m", "src.diffusion.inpaint_generate", "--good-dir", p / "good", "--out", out,
            "--prompt", f"a photo of sks {label}" if use_lora else f"a small {label} defect",
@@ -503,55 +473,46 @@ def build(default_project="data/my_project"):
             sam_model = gr.Textbox(SAM_MODEL, label="SAM model")
 
         with gr.Tab("1 · Images"):
-            gr.Markdown("Upload **good** (defect-free) images and **defect** images of the same product/camera.")
+            gr.Markdown(
+                "Upload images of the same product and camera. You can select images **and their label files "
+                "together**, or upload a **.zip**.  \n"
+                "Supported labels: **YOLO** `.txt` (boxes or segmentation polygons, + `classes.txt`/`data.yaml` "
+                "for names), **Pascal VOC** `.xml`, **COCO** `.json`, **labelme** `.json`. "
+                "Defect images without a label file can be boxed in tab 2. Good images need no labels "
+                "(empty YOLO `.txt` files are fine).")
             with gr.Row():
-                up_good = gr.File(file_count="multiple", label="Good images")
-                up_def = gr.File(file_count="multiple", label="Defect images")
-            with gr.Row():
-                btn_good = gr.Button("Add good images")
-                btn_def = gr.Button("Add defect images")
-                btn_refresh = gr.Button("Refresh")
+                with gr.Column():
+                    up_good = gr.File(file_count="multiple", label="Good images (labels optional / empty)")
+                    btn_good = gr.Button("Add good images")
+                with gr.Column():
+                    up_def = gr.File(file_count="multiple", label="Defect images + label files (or a .zip)")
+                    btn_def = gr.Button("Add defect images + labels", variant="primary")
+            btn_refresh = gr.Button("Refresh")
             up_msg = gr.Markdown()
             status = gr.Markdown(status_text(default_project))
 
-        with gr.Tab("2 · Annotate"):
-            gr.Markdown("**Defect images:** drag a tight box around every defect.  \n"
-                        "**Good images:** click points around the part, then *Finish outline* - so new defects "
-                        "land on the part, not the background.")
+        with gr.Tab("2 · Annotate") as tab_annot:
+            gr.Markdown("Check / fix the defect boxes (imported or drawn). Only defect images are annotated.")
             with gr.Row():
                 first = image_choices(default_project)
-                img_sel = gr.Dropdown(first, value=first[0] if first else None, label="Image", scale=3)
+                img_sel = gr.Dropdown(first, value=first[0] if first else None, label="Defect image", scale=3)
                 btn_prev = gr.Button("◀ Prev", scale=0)
                 btn_next = gr.Button("Next ▶", scale=0)
             hint = gr.Markdown()
-            with gr.Group(visible=True) as box_panel:
-                with gr.Row():
-                    label = gr.Textbox("defect", label="Label for new boxes (e.g. particle, scratch)", scale=3)
-                    btn_relabel = gr.Button("Apply label to all boxes in this image", scale=1)
-                annot = image_annotator(None, label_list=[NEW_TAG], label_colors=[(255, 160, 0)],
-                                        use_default_label=True, sources=[], show_clear_button=False,
-                                        image_type="filepath",
-                                        box_min_size=3, handle_size=6, height=700, elem_id="annot",
-                                        label="Drag to draw · wheel to zoom · hand tool to pan")
-            with gr.Group(visible=False) as outline_panel:
-                with gr.Row():
-                    action = gr.Radio([ADD_POINT, MOVE], value=ADD_POINT, label="Click action")
-                    zoom = gr.Radio(["1×", "2×", "4×"], value="1×", label="Zoom")
-                canvas = gr.Image(type="numpy", interactive=False, label="Click around the part", height=650,
-                                  elem_id="canvas")
-                with gr.Row():
-                    btn_finish = gr.Button("Finish outline", variant="primary")
-                    btn_undo = gr.Button("Undo")
-                    btn_clear = gr.Button("Clear outline", variant="stop")
-            pending = gr.State([])
-            view = gr.State({})
+            with gr.Row():
+                label = gr.Textbox("defect", label="Label for new boxes (e.g. particle, scratch)", scale=3)
+                btn_relabel = gr.Button("Apply label to all boxes in this image", scale=1)
+            annot = image_annotator(None, label_list=[NEW_TAG], label_colors=[(255, 160, 0)],
+                                    use_default_label=True, sources=[], show_clear_button=False,
+                                    image_type="filepath", box_min_size=3, handle_size=6, height=700,
+                                    elem_id="annot", label="Drag to draw · wheel to zoom · hand tool to pan")
 
         with gr.Tab("3 · Masks"):
             gr.Markdown("Turns your boxes into exact defect masks.")
             method = gr.Radio(["SAM (exact outline, downloads ~375 MB once)", "Filled boxes (no download)"],
                               value="SAM (exact outline, downloads ~375 MB once)", label="Method")
             btn_masks = gr.Button("Make masks", variant="primary")
-            mask_gal = gr.Gallery(label="Masks (red outline)", columns=3, height=500)
+            mask_gal = gr.Gallery(label="Masks (red outline)", columns=3, height=500, object_fit="contain")
             mask_log = gr.Textbox(label="Log", lines=8, max_lines=20, autoscroll=True)
 
         with gr.Tab("4 · Train"):
@@ -579,8 +540,14 @@ def build(default_project="data/my_project"):
                                            "blob = spots/stains)")
                 lora_scale = gr.Slider(0.3, 1.2, value=1.0, step=0.05, label="LoRA strength")
                 infer_steps = gr.Slider(10, 60, value=30, step=5, label="Quality steps")
+            with gr.Row():
+                use_roi = gr.Checkbox(True, label="Keep defects on the part (auto-detect part on good images)")
+                roi_sens = gr.Slider(2, 30, value=6, step=1,
+                                     label="Part detection sensitivity (lower = larger area)")
+                btn_roi = gr.Button("Preview part area")
+            roi_gal = gr.Gallery(label="Auto-detected part area (green)", columns=4, height=300, object_fit="contain")
             btn_gen = gr.Button("Generate", variant="primary")
-            gen_gal = gr.Gallery(label="Generated (red = mask, green = YOLO box)", columns=4, height=600)
+            gen_gal = gr.Gallery(label="Generated (red = mask, green = YOLO box)", columns=4, height=600, object_fit="contain")
             gen_log = gr.Textbox(label="Log", lines=8, max_lines=20, autoscroll=True)
 
         with gr.Tab("6 · Export"):
@@ -590,23 +557,23 @@ def build(default_project="data/my_project"):
             exp_file = gr.File(label="Download")
 
         # ---- wiring
-        btn_good.click(lambda pr, f: upload(pr, f, "good"), [project, up_good], [up_msg, status, img_sel])
-        btn_def.click(lambda pr, f: upload(pr, f, "defect_raw"), [project, up_def], [up_msg, status, img_sel])
+        btn_good.click(upload_good, [project, up_good], [up_msg, status])
+        btn_def.click(upload_defects, [project, up_def], [up_msg, status, img_sel]).then(
+            label_choices, project, train_label).then(label_choices, project, gen_label).then(
+            label_choices, project, exp_label)
         btn_refresh.click(refresh, project, [status, img_sel])
         project.submit(refresh, project, [status, img_sel])
 
-        show_io = ([project, img_sel, label, zoom, view],
-                   [annot, canvas, pending, view, hint, box_panel, outline_panel])
-        demo.load(show_image, *show_io)
-        img_sel.change(show_image, *show_io)
-        zoom.change(show_image, *show_io)
+        # on every page load: re-read the project folder (images/labels may have changed since startup)
+        demo.load(refresh, project, [status, img_sel]).then(show_image, [project, img_sel], [annot, hint]).then(
+            None, None, None, js=CREATE_MODE_JS).then(
+            label_choices, project, train_label).then(label_choices, project, gen_label).then(
+            label_choices, project, exp_label)
+        img_sel.change(show_image, [project, img_sel], [annot, hint]).then(None, None, None, js=CREATE_MODE_JS)
+        tab_annot.select(None, None, None, js=CREATE_MODE_JS)
         annot.change(save_boxes, [project, img_sel, annot, label], hint)
-        btn_relabel.click(relabel_all, [project, img_sel, label, zoom, view], show_io[1])
-        out4 = [canvas, pending, view, hint]
-        canvas.select(on_click, [project, img_sel, action, pending, zoom, view], out4)
-        btn_finish.click(finish_outline, [project, img_sel, pending, zoom, view], out4)
-        btn_undo.click(undo, [project, img_sel, pending, zoom, view], out4)
-        btn_clear.click(clear_all, [project, img_sel, zoom, view], out4)
+        btn_relabel.click(relabel_all, [project, img_sel, label], [annot, hint]).then(
+            None, None, None, js=CREATE_MODE_JS)
         btn_prev.click(lambda pr, n: step_image(pr, n, -1), [project, img_sel], img_sel)
         btn_next.click(lambda pr, n: step_image(pr, n, 1), [project, img_sel], img_sel)
 
@@ -614,8 +581,9 @@ def build(default_project="data/my_project"):
             label_choices, project, train_label).then(label_choices, project, gen_label).then(
             label_choices, project, exp_label).then(status_text, project, status)
         btn_train.click(train, [project, train_label, steps, rank, lr, cpi, sd_model], [train_log, preview])
-        btn_gen.click(generate, [project, gen_label, use_lora, num, mask_mode, lora_scale, infer_steps, sd_model],
-                      [gen_log, gen_gal])
+        btn_gen.click(generate, [project, gen_label, use_lora, num, mask_mode, lora_scale, infer_steps, sd_model,
+                                 use_roi, roi_sens], [gen_log, gen_gal])
+        btn_roi.click(preview_roi, [project, roi_sens], roi_gal)
         btn_exp.click(export, [project, exp_label], [exp_file, exp_msg])
     return demo
 

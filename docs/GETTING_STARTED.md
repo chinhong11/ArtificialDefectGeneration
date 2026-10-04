@@ -36,14 +36,14 @@ Everything runs on your own PC; images never leave it. Work through the tabs lef
 
 | Tab | What you do |
 |---|---|
-| 1 · Images | Upload good images and defect images |
-| 2 · Annotate | **Defect images:** drag a box around each defect (drag corners to resize, mouse wheel to zoom, *Space* resets zoom, hand tool to pan/select, *Delete* removes the selected box). Boxes save automatically with the label in the textbox. **Good images:** click around the part, then *Finish outline* |
+| 1 · Images | Upload **good images** (no labels needed; empty YOLO `.txt` files are fine) and **defect images together with their label files** (or a `.zip`). Supported: YOLO `.txt` boxes or segmentation polygons (+ `classes.txt` / `data.yaml`), Pascal VOC `.xml`, COCO `.json`, labelme `.json` |
+| 2 · Annotate | Check / fix defect boxes, or draw them for defect images that came without labels: drag to draw, drag corners to resize, mouse wheel to zoom (*Space* resets), hand tool to select/pan, *Delete* removes the selected box. Saved automatically. Good images are never annotated |
 | 3 · Masks | *Make masks* (SAM = exact outline, or filled boxes) and check the red outlines |
 | 4 · Train | Pick steps (200 = quick check, 1000–3000 = real) → *Start training*; previews appear while it trains |
-| 5 · Generate | Pick how many images and defect shapes → *Generate*; results show mask (red) + YOLO box (green) |
+| 5 · Generate | Pick how many images and defect shapes → *Generate*. The part is **auto-detected** on good images so defects aren't painted on the background (*Preview part area* to check, sensitivity slider to adjust). Results show mask (red) + YOLO box (green) |
 | 6 · Export | *Create zip* → images + masks + YOLO labels |
 
-Annotations are saved as labelme JSON next to each image, so you can also open them in labelme. The command-line steps below do the same thing as the UI.
+Imported labels and drawn boxes are stored as labelme JSON next to each defect image, so you can also open them in labelme. Command line: `python -m src.label_import --images <folder>` converts YOLO / VOC / COCO labels the same way, and `python -m src.roi` makes the automatic part masks. The command-line steps below do the same thing as the UI.
 
 ---
 

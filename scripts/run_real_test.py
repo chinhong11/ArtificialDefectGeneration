@@ -1,8 +1,10 @@
 """One-command test of the whole pipeline with the REAL models on your images.
 
-Prepare (labelme):
-    <data>/good/*.png|jpg|webp        + optional polygon labelled "roi" around the part (JSON next to image)
-    <data>/defect_raw/*.png|jpg|webp  + rectangles around each defect (JSON next to image)
+Prepare:
+    <data>/good/*.png|jpg|webp        good images, no labels needed (part area is auto-detected)
+    <data>/defect_raw/*.png|jpg|webp  defect images + labels next to them: YOLO .txt (boxes or
+                                      polygons, + classes.txt/data.yaml), VOC .xml, COCO .json
+                                      or labelme .json
 
 Run:
     python scripts/run_real_test.py --data data/connector
@@ -94,8 +96,9 @@ def env_report():
 
 def first_label(json_dir):
     for jf in sorted(Path(json_dir).glob("*.json")):
-        for s in json.loads(jf.read_text(encoding="utf-8")).get("shapes", []):
-            if s.get("shape_type") == "rectangle":
+        data = json.loads(jf.read_text(encoding="utf-8"))
+        for s in data.get("shapes", []) if isinstance(data, dict) else []:
+            if s.get("shape_type") == "rectangle" or (s.get("shape_type") == "polygon" and s["label"] != "roi"):
                 return s["label"].strip()
     return None
 
@@ -146,6 +149,7 @@ def main():
     ap.add_argument("--skip-train", action="store_true", help="Stop after the zero-shot test")
     ap.add_argument("--cpu", action="store_true", help="Force CPU (very slow; tiny step counts)")
     ap.add_argument("--no-sam", action="store_true", help="Use the filled boxes as masks instead of SAM")
+    ap.add_argument("--no-roi", action="store_true", help="Don't restrict defects to the auto-detected part")
     # overrides (mainly for offline testing with tiny models)
     ap.add_argument("--sd-model", default=SD_MODEL)
     ap.add_argument("--sam-model", default=SAM_MODEL)
@@ -171,13 +175,15 @@ def main():
 
     try:
         raw, good = data / "defect_raw", data / "good"
-        if not list_images(raw) or not list(raw.glob("*.json")):
-            raise RuntimeError(f"{raw} needs defect images + labelme rectangle .json files")
+        if not list_images(raw):
+            raise RuntimeError(f"{raw} has no defect images")
+        # 0. labels: YOLO txt / VOC xml / COCO json / labelme json -> labelme JSON next to each image
+        r.run("0 import labels", ["-m", "src.label_import", "--images", raw, "--keep-existing"])
         if not list_images(good):
             raise RuntimeError(f"{good} has no images")
         label = args.label or first_label(raw)
         if not label:
-            raise RuntimeError("no rectangle shapes found in defect_raw/*.json")
+            raise RuntimeError("no defect labels found in defect_raw/ (YOLO .txt, VOC .xml, COCO/labelme .json)")
         r.note(f"defect label: {label}")
         caption = f"a photo of sks {label}"
 
@@ -194,9 +200,9 @@ def main():
                                 "--masks", work / "masks" / label, "--overlay", "--cols", 3, "--tile", 600,
                                 "--out", out / "01_sam_masks.png"])
 
-        # 2. ROI
+        # 2. ROI: 'roi' polygons in good/*.json if present, otherwise auto-detected part area
         roi_dir = None
-        if any(good.glob("*.json")):
+        if any("roi" in jf.read_text(encoding="utf-8") for jf in good.glob("*.json")):
             r.run("2 ROI masks", ["scripts/labelme_to_masks.py", "--json-dir", good, "--out-dir", work / "roi",
                                   "--labels", "roi"])
             roi_dir = work / "roi" / "roi"
@@ -204,9 +210,14 @@ def main():
             r.check("2b ROI coverage", not missing,
                     "all good images have an ROI" if not missing else f"no ROI for {missing}")
             if missing:
-                raise RuntimeError("every good image needs a 'roi' polygon (or remove all good/*.json)")
+                raise RuntimeError("every good image needs a 'roi' polygon (or remove them to use auto-detection)")
+        elif not args.no_roi:
+            r.run("2 auto part area", ["-m", "src.roi", "--images", good, "--out", work / "roi_auto"])
+            roi_dir = work / "roi_auto"
+            r.run("2b grid part area", ["scripts/make_grid.py", "--images", good, "--masks", roi_dir, "--overlay",
+                                        "--cols", 3, "--tile", 600, "--out", out / "00_part_area.png"])
         else:
-            r.check("2 ROI masks", True, "WARNING: no ROI polygons in good/ - defects may land on background")
+            r.check("2 ROI", True, "WARNING: --no-roi - defects may land on the background")
         roi_args = ["--roi-dir", roi_dir] if roi_dir else []
 
         # 3. crops
