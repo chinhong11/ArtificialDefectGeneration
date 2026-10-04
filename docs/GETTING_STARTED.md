@@ -27,6 +27,26 @@ The first real run downloads the base model `stable-diffusion-v1-5/stable-diffus
 
 ---
 
+## Easiest: use the browser UI
+
+```bash
+python -m ui.app          # then open http://127.0.0.1:7860 in your browser
+```
+Everything runs on your own PC; images never leave it. Work through the tabs left to right:
+
+| Tab | What you do |
+|---|---|
+| 1 · Images | Upload good images and defect images |
+| 2 · Annotate | Defect images: click 2 corners to box each defect. Good images: click around the part, then *Finish outline*. Small defects: *Move view* → click the defect → Zoom 4× / 8× |
+| 3 · Masks | *Make masks* (SAM = exact outline, or filled boxes) and check the red outlines |
+| 4 · Train | Pick steps (200 = quick check, 1000–3000 = real) → *Start training*; previews appear while it trains |
+| 5 · Generate | Pick how many images and defect shapes → *Generate*; results show mask (red) + YOLO box (green) |
+| 6 · Export | *Create zip* → images + masks + YOLO labels |
+
+Annotations are saved as labelme JSON next to each image, so you can also open them in labelme. The command-line steps below do the same thing as the UI.
+
+---
+
 ## Quick check: test everything on a few images first
 
 Before annotating a full dataset, run the whole pipeline once on ~5 images with the real models:
@@ -212,6 +232,7 @@ Read *AnomalyDiffusion: Few-Shot Anomaly Image Generation with Diffusion Model* 
 | `src/mask_gen.py` | 5 new defect masks | no |
 | `src/diffusion/inpaint_generate.py` | 5 generation | yes |
 | `src/export.py` | 5 YOLO / COCO export | no |
+| `ui/app.py` | browser UI for all steps | for train/generate |
 | `tests/` | self-test with a tiny random model | no |
 
 ## Honest limits

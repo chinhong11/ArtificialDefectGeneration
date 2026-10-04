@@ -19,6 +19,13 @@ Full research write-up: **[docs/RESEARCH.md](docs/RESEARCH.md)**
 **PatchCore:** trains on good images only; use the synthetic defects to validate it and tune its threshold, not to train it.
 
 ## Quick start
+**Browser UI** (all steps, incl. drawing boxes):
+```bash
+pip install -r requirements.txt   # install PyTorch for your CUDA first
+python -m ui.app                  # open http://127.0.0.1:7860
+```
+
+**Command line:**
 Step-by-step guide: **[docs/GETTING_STARTED.md](docs/GETTING_STARTED.md)**
 
 ```bash

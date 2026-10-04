@@ -12,6 +12,9 @@ accelerate
 peft>=0.10
 safetensors
 
+# UI (python -m ui.app)
+gradio>=5
+
 # Optional
 bitsandbytes   # --use-8bit-adam (Linux + CUDA)
 labelme        # annotation tool
