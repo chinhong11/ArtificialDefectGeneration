@@ -145,6 +145,7 @@ def main():
     ap.add_argument("--num", type=int, default=8, help="Images to generate with the LoRA")
     ap.add_argument("--skip-train", action="store_true", help="Stop after the zero-shot test")
     ap.add_argument("--cpu", action="store_true", help="Force CPU (very slow; tiny step counts)")
+    ap.add_argument("--no-sam", action="store_true", help="Use the filled boxes as masks instead of SAM")
     # overrides (mainly for offline testing with tiny models)
     ap.add_argument("--sd-model", default=SD_MODEL)
     ap.add_argument("--sam-model", default=SAM_MODEL)
@@ -180,10 +181,15 @@ def main():
         r.note(f"defect label: {label}")
         caption = f"a photo of sks {label}"
 
-        # 1. SAM masks
-        r.run("1 SAM box -> mask", ["scripts/sam_box_to_mask.py", "--json-dir", raw, "--out-dir", work / "masks",
-                                    "--copy-images-to", work / "defect", "--model", args.sam_model,
-                                    "--fallback-box"])
+        # 1. masks (SAM, or filled boxes with --no-sam)
+        if args.no_sam:
+            r.run("1 box -> mask (no SAM)", ["scripts/labelme_to_masks.py", "--json-dir", raw,
+                                             "--out-dir", work / "masks", "--labels", label,
+                                             "--copy-images-to", work / "defect"])
+        else:
+            r.run("1 SAM box -> mask", ["scripts/sam_box_to_mask.py", "--json-dir", raw, "--out-dir", work / "masks",
+                                        "--copy-images-to", work / "defect", "--model", args.sam_model,
+                                        "--fallback-box"])
         r.run("1b grid masks", ["scripts/make_grid.py", "--images", work / "defect" / label,
                                 "--masks", work / "masks" / label, "--overlay", "--cols", 3, "--tile", 600,
                                 "--out", out / "01_sam_masks.png"])

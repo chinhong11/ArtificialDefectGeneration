@@ -41,6 +41,8 @@ Before annotating a full dataset, run the whole pipeline once on ~5 images with 
 
 It runs a short LoRA training (200 steps on GPU) — enough to prove everything works, not enough for good quality.
 
+Options: `--no-sam` (use the filled boxes as masks), `--skip-train`, `--steps N`, `--sd-model` / `--sam-model <local folder>` if Hugging Face is blocked on your network.
+
 ---
 
 ## Step 1 — Data and masks (most important step)
