@@ -38,5 +38,8 @@ python -m src.diffusion.inpaint_generate ...          # 5. synthetic images + ma
 python -m pytest -q tests                             # self-test (tiny random model, CPU)
 ```
 
+**NVIDIA Cosmos-AnomalyGen** (optional second generator, Docker + NVIDIA GPU): see
+**[docs/ANOMALYGEN.md](docs/ANOMALYGEN.md)**; `scripts/export_anomalygen.py` builds its dataset from your images + labels.
+
 ## Status
 Starter code tested end-to-end on CPU with a tiny random model only; not yet validated on real defect data.
